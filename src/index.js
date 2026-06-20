@@ -1,7 +1,7 @@
 const BAD_KEY_RETRY_INTERVAL = 600;
 const DEFAULT_ONDEMAND_MODEL = "predefined-claude-4-6-opus";
 const ONDEMAND_API_BASE = "https://api.on-demand.io/chat/v1";
-const ONDEMAND_MEDIA_API_BASE = "https://api.on-demand.io/media/v1";
+const ONDEMAND_MEDIA_API_BASE = "https://api.on-demand.io/media/v1/client";
 
 const DEFAULT_MEDIA_PLUGIN_IDS = [
   "plugin-1713954536",
@@ -123,7 +123,7 @@ function joinUrl(base, path) {
 function deriveMediaApiBase(chatApiBase) {
   const normalized = String(chatApiBase || ONDEMAND_API_BASE).replace(/\/+$/, "");
   if (normalized.endsWith("/chat/v1")) {
-    return `${normalized.slice(0, -"/chat/v1".length)}/media/v1`;
+    return `${normalized.slice(0, -"/chat/v1".length)}/media/v1/client`;
   }
   return ONDEMAND_MEDIA_API_BASE;
 }
