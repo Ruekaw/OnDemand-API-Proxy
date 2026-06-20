@@ -1,7 +1,7 @@
 const BAD_KEY_RETRY_INTERVAL = 600;
 const DEFAULT_ONDEMAND_MODEL = "predefined-claude-4-6-opus";
 const ONDEMAND_API_BASE = "https://api.on-demand.io/chat/v1";
-const ONDEMAND_MEDIA_API_BASE = "https://api.on-demand.io/media/v1";
+const ONDEMAND_MEDIA_API_BASE = "https://api.on-demand.io/media/v1/client";
 
 const DEFAULT_MEDIA_PLUGIN_IDS = [
   "plugin-1713954536",
@@ -123,7 +123,7 @@ function joinUrl(base, path) {
 function deriveMediaApiBase(chatApiBase) {
   const normalized = String(chatApiBase || ONDEMAND_API_BASE).replace(/\/+$/, "");
   if (normalized.endsWith("/chat/v1")) {
-    return `${normalized.slice(0, -"/chat/v1".length)}/media/v1`;
+    return `${normalized.slice(0, -"/chat/v1".length)}/media/v1/client`;
   }
   return ONDEMAND_MEDIA_API_BASE;
 }
@@ -161,9 +161,21 @@ function getEndpointId(openaiModel, defaultOndemandModel) {
   return MODEL_ALIASES[normalizeModelKey(requested)] || defaultOndemandModel;
 }
 
+function isUnsetValue(value) {
+  if (value === undefined || value === null) return true;
+  const normalized = String(value).trim().toLowerCase();
+  return [
+    "",
+    "undefined",
+    "[undefined]",
+    "null",
+    "[null]",
+  ].includes(normalized);
+}
+
 function firstNonEmptyString(...values) {
   for (const value of values) {
-    if (typeof value === "string" && value.trim()) return value;
+    if (typeof value === "string" && !isUnsetValue(value)) return value.trim();
   }
   return "";
 }
@@ -433,7 +445,7 @@ function buildOnDemandQuery(messages) {
 }
 
 function valueAsString(value) {
-  if (value === undefined || value === null) return "";
+  if (isUnsetValue(value)) return "";
   return String(value).trim();
 }
 
@@ -500,7 +512,7 @@ function mediaUploadPayload(data) {
 
 function numberOrString(value, fallback = 0) {
   if (typeof value === "number" && Number.isFinite(value)) return value;
-  if (typeof value === "string" && value.trim()) return value;
+  if (typeof value === "string" && !isUnsetValue(value)) return value.trim();
   return fallback;
 }
 
@@ -914,7 +926,17 @@ function extractTextDelta(payload, state) {
 
 function arrayOfStrings(value) {
   if (!Array.isArray(value)) return [];
-  return value.map((item) => String(item).trim()).filter(Boolean);
+  return value.map((item) => valueAsString(item)).filter(Boolean);
+}
+
+function optionalNumber(value) {
+  if (isUnsetValue(value)) return null;
+  if (typeof value === "number" && Number.isFinite(value)) return value;
+  if (typeof value === "string") {
+    const parsed = Number(value.trim());
+    return Number.isFinite(parsed) ? parsed : null;
+  }
+  return null;
 }
 
 function buildModelConfigs(data) {
@@ -923,35 +945,59 @@ function buildModelConfigs(data) {
       ? data.modelConfigs
       : {}),
   };
+  let numberValue;
 
-  if (data?.max_tokens !== undefined) modelConfigs.maxTokens = data.max_tokens;
-  if (data?.max_completion_tokens !== undefined) {
-    modelConfigs.maxTokens = data.max_completion_tokens;
+  numberValue = optionalNumber(data?.max_tokens);
+  if (numberValue !== null) modelConfigs.maxTokens = numberValue;
+  numberValue = optionalNumber(data?.max_completion_tokens);
+  if (numberValue !== null) {
+    modelConfigs.maxTokens = numberValue;
   }
-  if (data?.temperature !== undefined) modelConfigs.temperature = data.temperature;
-  if (data?.presence_penalty !== undefined) {
-    modelConfigs.presencePenalty = data.presence_penalty;
+  numberValue = optionalNumber(data?.temperature);
+  if (numberValue !== null) modelConfigs.temperature = numberValue;
+  numberValue = optionalNumber(data?.presence_penalty);
+  if (numberValue !== null) {
+    modelConfigs.presencePenalty = numberValue;
   }
-  if (data?.frequency_penalty !== undefined) {
-    modelConfigs.frequencyPenalty = data.frequency_penalty;
+  numberValue = optionalNumber(data?.frequency_penalty);
+  if (numberValue !== null) {
+    modelConfigs.frequencyPenalty = numberValue;
   }
-  if (data?.top_p !== undefined) modelConfigs.topP = data.top_p;
-  if (typeof data?.stop === "string") modelConfigs.stopSequences = [data.stop];
+  numberValue = optionalNumber(data?.top_p);
+  if (numberValue !== null) modelConfigs.topP = numberValue;
+  if (typeof data?.stop === "string" && valueAsString(data.stop)) {
+    modelConfigs.stopSequences = [valueAsString(data.stop)];
+  }
   if (Array.isArray(data?.stop)) modelConfigs.stopSequences = data.stop;
 
   return Object.keys(modelConfigs).length > 0 ? modelConfigs : null;
 }
 
+function optionalBoolean(value) {
+  if (isUnsetValue(value)) return null;
+  if (typeof value === "boolean") return value;
+  const normalized = String(value).trim().toLowerCase();
+  if (["true", "1", "yes"].includes(normalized)) return true;
+  if (["false", "0", "no"].includes(normalized)) return false;
+  return null;
+}
+
 function buildQueryPayload(query, data) {
   const modelConfigs = buildModelConfigs(data);
+  const reasoningMode = valueAsString(data?.reasoningMode || data?.reasoning_mode);
+  const reasoningEffort = valueAsString(
+    data?.reasoningEffort || data?.reasoning_effort,
+  );
+  const useMemory = optionalBoolean(data?.useMemory);
+
   return {
     query,
     agentIds: arrayOfStrings(data?.agentIds),
     pluginIds: arrayOfStrings(data?.pluginIds),
     ...(modelConfigs ? { modelConfigs } : {}),
-    ...(data?.reasoningMode ? { reasoningMode: data.reasoningMode } : {}),
-    ...(data?.reasoningEffort ? { reasoningEffort: data.reasoningEffort } : {}),
-    ...(data?.useMemory !== undefined ? { useMemory: Boolean(data.useMemory) } : {}),
+    ...(reasoningMode ? { reasoningMode } : {}),
+    ...(reasoningEffort ? { reasoningEffort } : {}),
+    ...(useMemory !== null ? { useMemory } : {}),
   };
 }
 
