@@ -1,7 +1,7 @@
 const BAD_KEY_RETRY_INTERVAL = 600;
 const DEFAULT_ONDEMAND_MODEL = "predefined-claude-4-6-opus";
 const ONDEMAND_API_BASE = "https://api.on-demand.io/chat/v1";
-const ONDEMAND_MEDIA_API_BASE = "https://api.on-demand.io/media/v1/client";
+const ONDEMAND_MEDIA_API_BASE = "https://api.on-demand.io/media/v1";
 
 const DEFAULT_MEDIA_PLUGIN_IDS = [
   "plugin-1713954536",
@@ -123,7 +123,7 @@ function joinUrl(base, path) {
 function deriveMediaApiBase(chatApiBase) {
   const normalized = String(chatApiBase || ONDEMAND_API_BASE).replace(/\/+$/, "");
   if (normalized.endsWith("/chat/v1")) {
-    return `${normalized.slice(0, -"/chat/v1".length)}/media/v1/client`;
+    return `${normalized.slice(0, -"/chat/v1".length)}/media/v1`;
   }
   return ONDEMAND_MEDIA_API_BASE;
 }
@@ -503,6 +503,18 @@ function normalizePluginList(value) {
   return DEFAULT_MEDIA_PLUGIN_IDS;
 }
 
+function normalizePluginInputs(value, pluginCount) {
+  if (Array.isArray(value)) {
+    return value.length > 0 ? value : [{}];
+  }
+
+  if (value && typeof value === "object") {
+    return [value];
+  }
+
+  return Array.from({ length: Math.max(pluginCount, 1) }, () => ({}));
+}
+
 function mediaUploadPayload(data) {
   if (data && typeof data === "object" && data.data && typeof data.data === "object") {
     return data.data;
@@ -621,6 +633,7 @@ function buildMediaMetadata(input, sessionId, responseMode = "sync") {
   const mimeType = firstNonEmptyString(input.mimeType, input.type);
   const name = firstNonEmptyString(input.name, inferMediaName(input.url, mimeType));
   const actor = firstNonEmptyString(input.createdBy, input.user, "ondemand-proxy");
+  const plugins = normalizePluginList(input.plugins || input.pluginIds);
   const externalUserId = firstNonEmptyString(
     input.externalUserId,
     input.external_user_id,
@@ -628,12 +641,16 @@ function buildMediaMetadata(input, sessionId, responseMode = "sync") {
   );
 
   return {
-    plugins: normalizePluginList(input.plugins || input.pluginIds),
+    plugins,
     createdBy: actor,
     updatedBy: firstNonEmptyString(input.updatedBy, input.user, actor),
     ...(externalUserId ? { externalUserId } : {}),
     sizeBytes: numberOrString(input.sizeBytes, 0),
     responseMode: normalizeMediaResponseMode(input.responseMode || responseMode),
+    pluginInputs: normalizePluginInputs(
+      input.pluginInputs || input.plugin_inputs,
+      plugins.length,
+    ),
     name,
     url: input.url,
     sessionId,
@@ -645,6 +662,26 @@ function mediaAuthHeaders(apikey, extraHeaders = {}) {
     apikey,
     ...extraHeaders,
   };
+}
+
+function createMediaUrlEndpoint(config) {
+  const base = String(config.ondemandMediaApiBase || ONDEMAND_MEDIA_API_BASE)
+    .replace(/\/+$/, "");
+
+  if (base.endsWith("/media/v1/public/file")) return base;
+  if (base.endsWith("/media/v1/public")) return joinUrl(base, "/file");
+  if (base.endsWith("/media/v1/client/media")) {
+    return `${base.slice(0, -"/client/media".length)}/public/file`;
+  }
+  if (base.endsWith("/media/v1/client")) {
+    return `${base.slice(0, -"/client".length)}/public/file`;
+  }
+  if (base.endsWith("/media/v1/media")) {
+    return `${base.slice(0, -"/media".length)}/public/file`;
+  }
+  if (base.endsWith("/media/v1")) return joinUrl(base, "/public/file");
+
+  return joinUrl(base, "/media/v1/public/file");
 }
 
 async function postMediaJson(config, apikey, path, body, label) {
@@ -662,13 +699,19 @@ async function postMediaJson(config, apikey, path, body, label) {
 
 async function uploadMediaFromUrl(config, apikey, media, sessionId, responseMode) {
   const metadata = buildMediaMetadata(media, sessionId, responseMode);
-  const registered = await postMediaJson(
-    config,
-    apikey,
-    "/media",
-    metadata,
-    "OnDemand media registration failed",
-  );
+  const response = await fetch(createMediaUrlEndpoint(config), {
+    method: "POST",
+    headers: mediaAuthHeaders(apikey, {
+      "Content-Type": "application/json",
+    }),
+    body: JSON.stringify(metadata),
+  });
+
+  if (!response.ok) {
+    await throwUpstreamError(response, "OnDemand media registration failed");
+  }
+
+  const registered = await readUpstreamBody(response);
   return normalizeMediaUploadResponse(registered, metadata);
 }
 
