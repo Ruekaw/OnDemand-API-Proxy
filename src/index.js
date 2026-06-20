@@ -1,6 +1,16 @@
 const BAD_KEY_RETRY_INTERVAL = 600;
 const DEFAULT_ONDEMAND_MODEL = "predefined-claude-4-6-opus";
 const ONDEMAND_API_BASE = "https://api.on-demand.io/chat/v1";
+const ONDEMAND_MEDIA_API_BASE = "https://api.on-demand.io/media/v1";
+
+const DEFAULT_MEDIA_PLUGIN_IDS = [
+  "plugin-1713954536",
+  "plugin-1713958591",
+  "plugin-1713958830",
+  "plugin-1713967141",
+  "plugin-1713961903",
+  "plugin-1744182699",
+];
 
 const MODEL_ALIASES = {
   "claude-opus-4-6": DEFAULT_ONDEMAND_MODEL,
@@ -16,8 +26,9 @@ const EXPOSED_MODELS = [
 
 const CORS_HEADERS = {
   "Access-Control-Allow-Origin": "*",
-  "Access-Control-Allow-Headers": "Authorization, Content-Type",
+  "Access-Control-Allow-Headers": "Authorization, Content-Type, X-Session-Id",
   "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
+  "Access-Control-Expose-Headers": "X-Session-Id",
 };
 
 class KeyManager {
@@ -104,11 +115,25 @@ function parseOnDemandApiKeys(rawValue) {
     .filter(Boolean);
 }
 
+function joinUrl(base, path) {
+  return `${String(base || "").replace(/\/+$/, "")}/${String(path || "")
+    .replace(/^\/+/, "")}`;
+}
+
+function deriveMediaApiBase(chatApiBase) {
+  const normalized = String(chatApiBase || ONDEMAND_API_BASE).replace(/\/+$/, "");
+  if (normalized.endsWith("/chat/v1")) {
+    return `${normalized.slice(0, -"/chat/v1".length)}/media/v1`;
+  }
+  return ONDEMAND_MEDIA_API_BASE;
+}
+
 function loadConfig(env = {}) {
   const retryInterval = Number.parseInt(
     env.BAD_KEY_RETRY_INTERVAL || String(BAD_KEY_RETRY_INTERVAL),
     10,
   );
+  const ondemandApiBase = env.ONDEMAND_API_BASE || ONDEMAND_API_BASE;
 
   return {
     apiKey: env.OPENAI_API_KEY || "",
@@ -116,7 +141,9 @@ function loadConfig(env = {}) {
     badKeyRetryInterval: Number.isFinite(retryInterval)
       ? retryInterval
       : BAD_KEY_RETRY_INTERVAL,
-    ondemandApiBase: env.ONDEMAND_API_BASE || ONDEMAND_API_BASE,
+    ondemandApiBase,
+    ondemandMediaApiBase:
+      env.ONDEMAND_MEDIA_API_BASE || deriveMediaApiBase(ondemandApiBase),
     defaultOndemandModel:
       env.DEFAULT_ONDEMAND_MODEL || DEFAULT_ONDEMAND_MODEL,
     debug: env.DEBUG_MODE === "true",
@@ -134,49 +161,289 @@ function getEndpointId(openaiModel, defaultOndemandModel) {
   return MODEL_ALIASES[normalizeModelKey(requested)] || defaultOndemandModel;
 }
 
-function textFromContent(content) {
-  if (typeof content === "string") return content;
-  if (content == null) return "";
-
-  if (Array.isArray(content)) {
-    return content
-      .map((part) => {
-        if (typeof part === "string") return part;
-        if (!part || typeof part !== "object") return "";
-        if (part.type === "text" && typeof part.text === "string") {
-          return part.text;
-        }
-        if (typeof part.text === "string") return part.text;
-        if (typeof part.content === "string") return part.content;
-        return "";
-      })
-      .filter(Boolean)
-      .join("\n");
+function firstNonEmptyString(...values) {
+  for (const value of values) {
+    if (typeof value === "string" && value.trim()) return value;
   }
-
-  return typeof content === "object" ? JSON.stringify(content) : String(content);
+  return "";
 }
 
-function buildOnDemandQuery(messages) {
-  if (!Array.isArray(messages)) return "";
+function extensionFromMimeType(mimeType) {
+  const normalized = String(mimeType || "").toLowerCase();
+  if (normalized.includes("png")) return "png";
+  if (normalized.includes("jpeg") || normalized.includes("jpg")) return "jpg";
+  if (normalized.includes("webp")) return "webp";
+  if (normalized.includes("gif")) return "gif";
+  if (normalized.includes("pdf")) return "pdf";
+  if (normalized.includes("mp4")) return "mp4";
+  if (normalized.includes("mpeg") || normalized.includes("mp3")) return "mp3";
+  if (normalized.includes("wav")) return "wav";
+  return "bin";
+}
+
+function mediaKindFromMimeType(mimeType) {
+  const normalized = String(mimeType || "").toLowerCase();
+  if (normalized.startsWith("image/")) return "image";
+  if (normalized.startsWith("audio/")) return "audio";
+  if (normalized.startsWith("video/")) return "video";
+  if (normalized) return "document";
+  return "";
+}
+
+function mediaKindFromUrl(url) {
+  const normalized = String(url || "").split("?")[0].toLowerCase();
+  if (/\.(png|jpe?g|webp|gif|bmp|tiff?|heic|heif)$/.test(normalized)) {
+    return "image";
+  }
+  if (/\.(mp3|m4a|wav|flac|aac|ogg|wma)$/.test(normalized)) {
+    return "audio";
+  }
+  if (/\.(mp4|mov|avi|mkv|webm|m4v|wmv)$/.test(normalized)) {
+    return "video";
+  }
+  if (normalized) return "document";
+  return "";
+}
+
+function inferMediaName(url, mimeType) {
+  if (String(url || "").startsWith("data:")) {
+    return `upload.${extensionFromMimeType(mimeType)}`;
+  }
+
+  try {
+    const pathname = new URL(url).pathname;
+    const basename = decodeURIComponent(pathname.split("/").filter(Boolean).pop() || "");
+    if (basename) return basename;
+  } catch (_) {
+    // Not a parseable URL. Fall through to the generic name.
+  }
+
+  return `upload.${extensionFromMimeType(mimeType)}`;
+}
+
+function normalizeMediaReference(value, fallback = {}) {
+  const media = typeof value === "string" ? { url: value } : value;
+  if (!media || typeof media !== "object") return null;
+
+  const imageUrl = typeof media.image_url === "string"
+    ? media.image_url
+    : media.image_url?.url;
+  const url = firstNonEmptyString(
+    media.url,
+    media.uri,
+    media.href,
+    media.file_url,
+    media.fileUrl,
+    media.secure_url,
+    media.publicUrl,
+    media.public_url,
+    imageUrl,
+    fallback.url,
+  );
+  const id = firstNonEmptyString(
+    media.id,
+    media.mediaId,
+    media.media_id,
+    media.fileId,
+    media.file_id,
+    fallback.id,
+  );
+  const mimeType = firstNonEmptyString(
+    media.mimeType,
+    media.mime_type,
+    media.contentType,
+    media.content_type,
+    typeof media.type === "string" && media.type.includes("/") ? media.type : "",
+    fallback.mimeType,
+  );
+
+  if (!url && !id) return null;
+
+  const source = firstNonEmptyString(
+    media.source,
+    fallback.source,
+    mediaKindFromMimeType(mimeType),
+    mediaKindFromUrl(url),
+    "media",
+  );
+  const name = firstNonEmptyString(
+    media.name,
+    media.filename,
+    media.fileName,
+    fallback.name,
+    inferMediaName(url, mimeType),
+  );
+
+  return {
+    ...(id ? { id } : {}),
+    ...(url ? { url } : {}),
+    name,
+    type: mimeType || source,
+    source,
+    ...(mimeType ? { mimeType } : {}),
+    ...(media.searchLevel ? { searchLevel: media.searchLevel } : {}),
+    ...(media.plugins ? { plugins: media.plugins } : {}),
+    ...(media.pluginIds ? { pluginIds: media.pluginIds } : {}),
+    ...(fallback.plugins ? { plugins: fallback.plugins } : {}),
+    ...(numberOrString(media.sizeBytes, fallback.sizeBytes)
+      ? { sizeBytes: numberOrString(media.sizeBytes, fallback.sizeBytes) }
+      : {}),
+  };
+}
+
+function mediaReferenceFromPart(part) {
+  if (!part || typeof part !== "object") return null;
+
+  if (part.type === "image_url" || part.type === "input_image") {
+    return normalizeMediaReference(part.image_url || part, {
+      source: "image",
+      name: "image",
+    });
+  }
+
+  if (part.type === "image") {
+    return normalizeMediaReference(part.image || part, {
+      source: "image",
+      name: "image",
+    });
+  }
+
+  if (part.type === "media") {
+    return normalizeMediaReference(part.media || part);
+  }
+
+  if (part.type === "file" || part.type === "input_file") {
+    return normalizeMediaReference(part.file || part, {
+      source: "document",
+    });
+  }
+
+  if (part.image_url) {
+    return normalizeMediaReference(part.image_url, {
+      source: "image",
+      name: "image",
+    });
+  }
+
+  if (part.media) return normalizeMediaReference(part.media);
+  if (part.file) return normalizeMediaReference(part.file, { source: "document" });
+
+  return null;
+}
+
+function contentToOnDemandInput(content) {
+  const textParts = [];
+  const media = [];
+
+  const addText = (value) => {
+    if (typeof value === "string") textParts.push(value);
+  };
+
+  const visit = (part) => {
+    if (typeof part === "string") {
+      addText(part);
+      return;
+    }
+
+    if (!part || typeof part !== "object") return;
+
+    const mediaReference = mediaReferenceFromPart(part);
+    if (mediaReference) media.push(mediaReference);
+
+    if (part.type === "text" && typeof part.text === "string") {
+      addText(part.text);
+      return;
+    }
+
+    if (typeof part.text === "string") addText(part.text);
+    if (typeof part.content === "string") addText(part.content);
+  };
+
+  if (typeof content === "string") {
+    addText(content);
+  } else if (Array.isArray(content)) {
+    content.forEach(visit);
+  } else if (content && typeof content === "object") {
+    visit(content);
+    if (textParts.length === 0 && media.length === 0) {
+      addText(JSON.stringify(content));
+    }
+  } else if (content != null) {
+    addText(String(content));
+  }
+
+  return {
+    text: textParts.filter((text) => text !== "").join("\n"),
+    media,
+  };
+}
+
+function mediaReferenceLine(media) {
+  const label = media.source === "image" ? "Image" : "Media";
+  const pieces = [`[${label}]`];
+  if (media.name) pieces.push(media.name);
+  if (media.id) pieces.push(`id=${media.id}`);
+  if (media.url && !media.url.startsWith("data:")) pieces.push(`url=${media.url}`);
+  return pieces.join(" ");
+}
+
+function messageTextForOnDemand(message) {
+  return [
+    message.text,
+    ...message.media.map((media) => mediaReferenceLine(media)),
+  ]
+    .filter((part) => part !== "")
+    .join("\n");
+}
+
+function buildOnDemandInput(messages) {
+  if (!Array.isArray(messages)) return { query: "", media: [] };
 
   const normalized = messages
-    .map((message) => ({
-      role: String(message?.role || "user").toLowerCase(),
-      content: textFromContent(message?.content),
-    }))
-    .filter((message) => message.content !== "");
+    .map((message) => {
+      const input = contentToOnDemandInput(message?.content);
+      return {
+        role: String(message?.role || "user").toLowerCase(),
+        text: input.text,
+        media: input.media,
+      };
+    })
+    .filter((message) => message.text !== "" || message.media.length > 0);
 
   if (
     normalized.length === 1 &&
     normalized[0].role === "user"
   ) {
-    return normalized[0].content;
+    return {
+      query: messageTextForOnDemand(normalized[0]),
+      media: normalized[0].media,
+    };
   }
 
-  return normalized
-    .map((message) => `[${message.role.toUpperCase()}]\n${message.content}`)
-    .join("\n\n");
+  return {
+    query: normalized
+      .map((message) => `[${message.role.toUpperCase()}]\n${messageTextForOnDemand(message)}`)
+      .join("\n\n"),
+    media: normalized.flatMap((message) => message.media),
+  };
+}
+
+function buildOnDemandQuery(messages) {
+  return buildOnDemandInput(messages).query;
+}
+
+function valueAsString(value) {
+  if (value === undefined || value === null) return "";
+  return String(value).trim();
+}
+
+function requestSessionId(request, data = {}) {
+  return valueAsString(
+    data.sessionId ||
+      data.session_id ||
+      data.session ||
+      request.headers.get("X-Session-Id"),
+  );
 }
 
 function openaiError(message, type = "invalid_request_error", code = undefined) {
@@ -202,8 +469,319 @@ async function throwUpstreamError(response, label) {
   throw error;
 }
 
+async function readUpstreamBody(response) {
+  const contentType = response.headers.get("Content-Type") || "";
+  if (contentType.includes("application/json")) {
+    return response.json();
+  }
+  return response.text();
+}
+
+function normalizePluginList(value) {
+  if (Array.isArray(value)) {
+    const plugins = value.map((plugin) => String(plugin).trim()).filter(Boolean);
+    return plugins.length > 0 ? plugins : DEFAULT_MEDIA_PLUGIN_IDS;
+  }
+
+  if (typeof value === "string") {
+    const plugins = value.split(",").map((plugin) => plugin.trim()).filter(Boolean);
+    return plugins.length > 0 ? plugins : DEFAULT_MEDIA_PLUGIN_IDS;
+  }
+
+  return DEFAULT_MEDIA_PLUGIN_IDS;
+}
+
+function mediaUploadPayload(data) {
+  if (data && typeof data === "object" && data.data && typeof data.data === "object") {
+    return data.data;
+  }
+  return data;
+}
+
+function numberOrString(value, fallback = 0) {
+  if (typeof value === "number" && Number.isFinite(value)) return value;
+  if (typeof value === "string" && value.trim()) return value;
+  return fallback;
+}
+
+function extractPreparedMediaUrl(data, fallbackUrl) {
+  const payload = mediaUploadPayload(data);
+  if (typeof payload === "string") return payload;
+  return firstNonEmptyString(
+    payload?.url,
+    payload?.secure_url,
+    payload?.publicUrl,
+    payload?.public_url,
+    data?.url,
+    data?.secure_url,
+    fallbackUrl,
+  );
+}
+
+function normalizeMediaUploadResponse(data, fallback = {}) {
+  const payload = mediaUploadPayload(data);
+  const id = firstNonEmptyString(
+    payload?.id,
+    payload?.mediaId,
+    payload?.media_id,
+    data?.id,
+    data?.mediaId,
+    fallback.id,
+  );
+  const url = firstNonEmptyString(
+    payload?.url,
+    payload?.secure_url,
+    payload?.publicUrl,
+    payload?.public_url,
+    data?.url,
+    data?.secure_url,
+    fallback.url,
+  );
+  const mimeType = firstNonEmptyString(
+    payload?.mimeType,
+    payload?.mime_type,
+    payload?.type,
+    fallback.mimeType,
+  );
+
+  return {
+    ...(id ? { id } : {}),
+    ...(url ? { url } : {}),
+    name: firstNonEmptyString(payload?.name, data?.name, fallback.name),
+    type: mimeType || fallback.type || mediaKindFromUrl(url) || "media",
+    source: firstNonEmptyString(
+      payload?.source,
+      fallback.source,
+      mediaKindFromMimeType(mimeType),
+      mediaKindFromUrl(url),
+      "media",
+    ),
+    ...(mimeType ? { mimeType } : {}),
+    searchLevel: firstNonEmptyString(
+      payload?.searchLevel,
+      data?.searchLevel,
+      fallback.searchLevel,
+      "shallow",
+    ),
+    ...(numberOrString(payload?.sizeBytes, fallback.sizeBytes)
+      ? { sizeBytes: numberOrString(payload?.sizeBytes, fallback.sizeBytes) }
+      : {}),
+  };
+}
+
+function isFileLike(value) {
+  return Boolean(
+    value &&
+    typeof value === "object" &&
+    typeof value.arrayBuffer === "function" &&
+    typeof value.name === "string"
+  );
+}
+
+function firstFormFile(formData) {
+  for (const [fieldName, value] of formData.entries()) {
+    if (isFileLike(value)) return { fieldName, file: value };
+  }
+  return null;
+}
+
+function appendIfMissing(formData, key, value) {
+  if (value === undefined || value === null || value === "") return;
+  if (!formData.has(key)) formData.append(key, String(value));
+}
+
+function addDefaultPlugins(formData, plugins) {
+  if (formData.has("plugins")) return;
+  normalizePluginList(plugins).forEach((pluginId) => {
+    formData.append("plugins", pluginId);
+  });
+}
+
+function enrichMediaFormData(formData, sessionId, defaults = {}) {
+  const formFile = firstFormFile(formData);
+  if (formFile && formFile.fieldName !== "file" && !formData.has("file")) {
+    formData.append("file", formFile.file, formFile.file.name);
+  }
+
+  const file = formFile?.file;
+  appendIfMissing(formData, "createdBy", defaults.createdBy || "ondemand-proxy");
+  appendIfMissing(formData, "updatedBy", defaults.updatedBy || "ondemand-proxy");
+  appendIfMissing(formData, "responseMode", defaults.responseMode || "sync");
+  appendIfMissing(formData, "sessionId", sessionId);
+  appendIfMissing(formData, "name", defaults.name || file?.name);
+  appendIfMissing(formData, "sizeBytes", defaults.sizeBytes || file?.size || 0);
+  addDefaultPlugins(formData, defaults.plugins);
+
+  return formFile;
+}
+
+function buildMediaMetadata(input, sessionId, responseMode = "sync") {
+  const mimeType = firstNonEmptyString(input.mimeType, input.type);
+  const name = firstNonEmptyString(input.name, inferMediaName(input.url, mimeType));
+
+  return {
+    plugins: normalizePluginList(input.plugins || input.pluginIds),
+    createdBy: input.createdBy || input.user || "ondemand-proxy",
+    updatedBy: input.updatedBy || input.user || "ondemand-proxy",
+    sizeBytes: numberOrString(input.sizeBytes, 0),
+    responseMode: input.responseMode || responseMode,
+    name,
+    url: input.url,
+    sessionId,
+  };
+}
+
+async function postMediaJson(config, apikey, path, body, label) {
+  const response = await fetch(joinUrl(config.ondemandMediaApiBase, path), {
+    method: "POST",
+    headers: {
+      apikey,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify(body),
+  });
+
+  if (!response.ok) await throwUpstreamError(response, label);
+  return readUpstreamBody(response);
+}
+
+async function prepareRemoteMediaUrl(config, apikey, url) {
+  const response = await fetch(joinUrl(config.ondemandMediaApiBase, "/media/upload"), {
+    method: "POST",
+    headers: {
+      apikey,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({ url }),
+  });
+
+  if (!response.ok) {
+    if ([400, 404, 405, 422].includes(response.status)) return null;
+    await throwUpstreamError(response, "OnDemand media URL upload failed");
+  }
+
+  return readUpstreamBody(response);
+}
+
+async function uploadMediaFromUrl(config, apikey, media, sessionId, responseMode) {
+  const prepared = await prepareRemoteMediaUrl(config, apikey, media.url);
+  const preparedUrl = prepared
+    ? extractPreparedMediaUrl(prepared, media.url)
+    : media.url;
+  const preparedPayload = mediaUploadPayload(prepared);
+  const metadata = buildMediaMetadata(
+    {
+      ...media,
+      url: preparedUrl,
+      sizeBytes: preparedPayload?.sizeBytes || media.sizeBytes,
+    },
+    sessionId,
+    responseMode,
+  );
+  const registered = await postMediaJson(
+    config,
+    apikey,
+    "/media",
+    metadata,
+    "OnDemand media registration failed",
+  );
+  return normalizeMediaUploadResponse(registered, metadata);
+}
+
+function dataUrlToBlob(dataUrl, fallbackName = "upload") {
+  const match = /^data:([^;,]+)?(;base64)?,(.*)$/s.exec(String(dataUrl || ""));
+  if (!match) return null;
+
+  const mimeType = match[1] || "application/octet-stream";
+  const isBase64 = Boolean(match[2]);
+  const raw = isBase64 ? atob(match[3]) : decodeURIComponent(match[3]);
+  const bytes = new Uint8Array(raw.length);
+  for (let index = 0; index < raw.length; index += 1) {
+    bytes[index] = raw.charCodeAt(index);
+  }
+
+  const name = fallbackName.includes(".")
+    ? fallbackName
+    : `${fallbackName}.${extensionFromMimeType(mimeType)}`;
+
+  return {
+    blob: new Blob([bytes], { type: mimeType }),
+    mimeType,
+    name,
+    size: bytes.byteLength,
+  };
+}
+
+async function uploadMediaFormData(config, apikey, formData, fallback = {}) {
+  let response = await fetch(joinUrl(config.ondemandMediaApiBase, "/media/raw"), {
+    method: "POST",
+    headers: { apikey },
+    body: formData,
+  });
+
+  if (!response.ok && [404, 405].includes(response.status)) {
+    response = await fetch(joinUrl(config.ondemandMediaApiBase, "/media/upload"), {
+      method: "POST",
+      headers: { apikey },
+      body: formData,
+    });
+  }
+
+  if (!response.ok) {
+    await throwUpstreamError(response, "OnDemand raw media upload failed");
+  }
+
+  const data = await readUpstreamBody(response);
+  return normalizeMediaUploadResponse(data, fallback);
+}
+
+async function uploadMediaFromDataUrl(config, apikey, media, sessionId, responseMode) {
+  const dataFile = dataUrlToBlob(media.url, media.name || "upload");
+  if (!dataFile) {
+    throw new Error("Invalid data URL media payload.");
+  }
+
+  const formData = new FormData();
+  formData.append("file", dataFile.blob, dataFile.name);
+  enrichMediaFormData(formData, sessionId, {
+    ...media,
+    name: dataFile.name,
+    mimeType: dataFile.mimeType,
+    sizeBytes: dataFile.size,
+    responseMode,
+  });
+
+  return uploadMediaFormData(config, apikey, formData, {
+    ...media,
+    name: dataFile.name,
+    mimeType: dataFile.mimeType,
+    sizeBytes: dataFile.size,
+  });
+}
+
+async function uploadMediaReference(config, apikey, media, sessionId, responseMode) {
+  if (!media?.url || media.id) return media;
+
+  if (media.url.startsWith("data:")) {
+    return uploadMediaFromDataUrl(config, apikey, media, sessionId, responseMode);
+  }
+
+  return uploadMediaFromUrl(config, apikey, media, sessionId, responseMode);
+}
+
+async function attachMediaToSession(config, apikey, sessionId, mediaRefs, responseMode) {
+  const uploaded = [];
+  for (const media of mediaRefs) {
+    uploaded.push(
+      await uploadMediaReference(config, apikey, media, sessionId, responseMode),
+    );
+  }
+  return uploaded;
+}
+
 async function createSession(apikey, apiBase, externalUserId = null) {
   const payload = {
+    agentIds: [],
     externalUserId: externalUserId || crypto.randomUUID(),
   };
 
@@ -228,12 +806,24 @@ async function createSession(apikey, apiBase, externalUserId = null) {
   return sessionId;
 }
 
-function makeCompletionResponse(openaiModel, content) {
+async function getOrCreateSession(
+  config,
+  apikey,
+  providedSessionId,
+  externalUserId,
+) {
+  const sessionId = valueAsString(providedSessionId);
+  if (sessionId) return sessionId;
+  return createSession(apikey, config.ondemandApiBase, externalUserId);
+}
+
+function makeCompletionResponse(openaiModel, content, sessionId = null) {
   return {
     id: `chatcmpl-${crypto.randomUUID()}`,
     object: "chat.completion",
     created: Math.floor(Date.now() / 1000),
     model: openaiModel,
+    ...(sessionId ? { session_id: sessionId } : {}),
     choices: [
       {
         index: 0,
@@ -322,11 +912,198 @@ function extractTextDelta(payload, state) {
   return "";
 }
 
+function arrayOfStrings(value) {
+  if (!Array.isArray(value)) return [];
+  return value.map((item) => String(item).trim()).filter(Boolean);
+}
+
+function buildModelConfigs(data) {
+  const modelConfigs = {
+    ...(data?.modelConfigs && typeof data.modelConfigs === "object"
+      ? data.modelConfigs
+      : {}),
+  };
+
+  if (data?.max_tokens !== undefined) modelConfigs.maxTokens = data.max_tokens;
+  if (data?.max_completion_tokens !== undefined) {
+    modelConfigs.maxTokens = data.max_completion_tokens;
+  }
+  if (data?.temperature !== undefined) modelConfigs.temperature = data.temperature;
+  if (data?.presence_penalty !== undefined) {
+    modelConfigs.presencePenalty = data.presence_penalty;
+  }
+  if (data?.frequency_penalty !== undefined) {
+    modelConfigs.frequencyPenalty = data.frequency_penalty;
+  }
+  if (data?.top_p !== undefined) modelConfigs.topP = data.top_p;
+  if (typeof data?.stop === "string") modelConfigs.stopSequences = [data.stop];
+  if (Array.isArray(data?.stop)) modelConfigs.stopSequences = data.stop;
+
+  return Object.keys(modelConfigs).length > 0 ? modelConfigs : null;
+}
+
+function buildQueryPayload(query, data) {
+  const modelConfigs = buildModelConfigs(data);
+  return {
+    query,
+    agentIds: arrayOfStrings(data?.agentIds),
+    pluginIds: arrayOfStrings(data?.pluginIds),
+    ...(modelConfigs ? { modelConfigs } : {}),
+    ...(data?.reasoningMode ? { reasoningMode: data.reasoningMode } : {}),
+    ...(data?.reasoningEffort ? { reasoningEffort: data.reasoningEffort } : {}),
+    ...(data?.useMemory !== undefined ? { useMemory: Boolean(data.useMemory) } : {}),
+  };
+}
+
+function isMultipartRequest(request) {
+  return (request.headers.get("Content-Type") || "")
+    .toLowerCase()
+    .includes("multipart/form-data");
+}
+
+function isJsonRequest(request) {
+  const contentType = (request.headers.get("Content-Type") || "").toLowerCase();
+  return !contentType || contentType.includes("application/json");
+}
+
+function mediaReferenceFromUploadBody(data) {
+  if (data?.media) return normalizeMediaReference(data.media);
+  if (data?.file) return normalizeMediaReference(data.file, { source: "document" });
+  if (data?.image_url) {
+    return normalizeMediaReference(data.image_url, {
+      source: "image",
+      name: "image",
+    });
+  }
+  return normalizeMediaReference(data);
+}
+
+function topLevelMediaReferences(data) {
+  const values = Array.isArray(data?.media)
+    ? data.media
+    : [data?.media, data?.file, data?.image_url].filter(Boolean);
+  return values
+    .map((value) => normalizeMediaReference(value))
+    .filter(Boolean);
+}
+
+async function handleMediaUpload(request, config, debug) {
+  if (isMultipartRequest(request)) {
+    let formData;
+    try {
+      formData = await request.formData();
+    } catch (error) {
+      debug(`multipart parse failed: ${error.message}`);
+      return jsonResponse(openaiError("Request body is not valid multipart form data."), 400);
+    }
+
+    if (!firstFormFile(formData) && !formData.get("url")) {
+      return jsonResponse(
+        openaiError("multipart upload must include a file field or url field."),
+        400,
+      );
+    }
+
+    const providedSessionId = valueAsString(
+      formData.get("sessionId") ||
+        formData.get("session_id") ||
+        request.headers.get("X-Session-Id"),
+    );
+
+    return withValidKey(config, debug, async (apikey) => {
+      const sessionId = await getOrCreateSession(
+        config,
+        apikey,
+        providedSessionId,
+        valueAsString(formData.get("user")),
+      );
+
+      if (formData.get("url") && !firstFormFile(formData)) {
+        const media = normalizeMediaReference({
+          url: valueAsString(formData.get("url")),
+          name: valueAsString(formData.get("name")),
+          mimeType: valueAsString(formData.get("mimeType") || formData.get("type")),
+          plugins: formData.getAll("plugins"),
+          sizeBytes: valueAsString(formData.get("sizeBytes")),
+        });
+        const uploaded = await uploadMediaReference(
+          config,
+          apikey,
+          media,
+          sessionId,
+          valueAsString(formData.get("responseMode")) || "sync",
+        );
+        return jsonResponse(
+          { object: "media", sessionId, media: uploaded },
+          200,
+          { "X-Session-Id": sessionId },
+        );
+      }
+
+      const formFile = enrichMediaFormData(formData, sessionId);
+      const uploaded = await uploadMediaFormData(config, apikey, formData, {
+        name: valueAsString(formData.get("name")) || formFile?.file?.name,
+        mimeType: formFile?.file?.type,
+        sizeBytes: formFile?.file?.size,
+      });
+      return jsonResponse(
+        { object: "media", sessionId, media: uploaded },
+        200,
+        { "X-Session-Id": sessionId },
+      );
+    });
+  }
+
+  if (!isJsonRequest(request)) {
+    return jsonResponse(
+      openaiError("Unsupported media upload content type. Use JSON or multipart/form-data."),
+      415,
+    );
+  }
+
+  let data;
+  try {
+    data = await request.json();
+  } catch (error) {
+    debug(`media upload JSON parse failed: ${error.message}`);
+    return jsonResponse(openaiError("Request body is not valid JSON."), 400);
+  }
+
+  const media = mediaReferenceFromUploadBody(data);
+  if (!media?.url && !media?.id) {
+    return jsonResponse(
+      openaiError("JSON upload must include url, image_url, media, or file."),
+      400,
+    );
+  }
+
+  return withValidKey(config, debug, async (apikey) => {
+    const sessionId = await getOrCreateSession(
+      config,
+      apikey,
+      requestSessionId(request, data),
+      data.user,
+    );
+    const uploaded = await uploadMediaReference(
+      config,
+      apikey,
+      media,
+      sessionId,
+      data.responseMode || "sync",
+    );
+    return jsonResponse(
+      { object: "media", sessionId, media: uploaded },
+      200,
+      { "X-Session-Id": sessionId },
+    );
+  });
+}
+
 async function postOnDemandQuery(
   config,
   apikey,
   sessionId,
-  query,
+  queryPayload,
   endpointId,
   responseMode,
 ) {
@@ -342,10 +1119,23 @@ async function postOnDemandQuery(
           : {}),
       },
       body: JSON.stringify({
-        query,
         endpointId,
-        pluginIds: [],
+        query: queryPayload.query,
+        agentIds: queryPayload.agentIds || [],
+        pluginIds: queryPayload.pluginIds || [],
         responseMode,
+        ...(queryPayload.modelConfigs
+          ? { modelConfigs: queryPayload.modelConfigs }
+          : {}),
+        ...(queryPayload.reasoningMode
+          ? { reasoningMode: queryPayload.reasoningMode }
+          : {}),
+        ...(queryPayload.reasoningEffort
+          ? { reasoningEffort: queryPayload.reasoningEffort }
+          : {}),
+        ...(queryPayload.useMemory !== undefined
+          ? { useMemory: queryPayload.useMemory }
+          : {}),
       }),
     },
   );
@@ -362,19 +1152,14 @@ async function handleSyncCompletion(
   apikey,
   openaiModel,
   endpointId,
-  query,
-  externalUserId,
+  queryPayload,
+  sessionId,
 ) {
-  const sessionId = await createSession(
-    apikey,
-    config.ondemandApiBase,
-    externalUserId,
-  );
   const response = await postOnDemandQuery(
     config,
     apikey,
     sessionId,
-    query,
+    queryPayload,
     endpointId,
     "sync",
   );
@@ -386,7 +1171,11 @@ async function handleSyncCompletion(
     data?.data?.message,
   ) || "";
 
-  return jsonResponse(makeCompletionResponse(openaiModel, answer));
+  return jsonResponse(
+    makeCompletionResponse(openaiModel, answer, sessionId),
+    200,
+    { "X-Session-Id": sessionId },
+  );
 }
 
 async function handleStreamCompletion(
@@ -394,19 +1183,14 @@ async function handleStreamCompletion(
   apikey,
   openaiModel,
   endpointId,
-  query,
-  externalUserId,
+  queryPayload,
+  sessionId,
 ) {
-  const sessionId = await createSession(
-    apikey,
-    config.ondemandApiBase,
-    externalUserId,
-  );
   const upstream = await postOnDemandQuery(
     config,
     apikey,
     sessionId,
-    query,
+    queryPayload,
     endpointId,
     "stream",
   );
@@ -539,6 +1323,7 @@ async function handleStreamCompletion(
       "Content-Type": "text/event-stream; charset=utf-8",
       "Cache-Control": "no-cache, no-transform",
       "X-Accel-Buffering": "no",
+      "X-Session-Id": sessionId,
       ...CORS_HEADERS,
     },
   });
@@ -649,9 +1434,18 @@ async function handleChatCompletions(request, config, debug) {
 
   const openaiModel = data.model || config.defaultOndemandModel;
   const endpointId = getEndpointId(openaiModel, config.defaultOndemandModel);
-  const query = buildOnDemandQuery(data.messages);
+  const input = buildOnDemandInput(data.messages);
+  const queryPayload = buildQueryPayload(input.query, data);
+  const mediaRefs = [
+    ...input.media,
+    ...topLevelMediaReferences(data),
+  ];
 
-  if (!query) {
+  if (!queryPayload.query && mediaRefs.length > 0) {
+    queryPayload.query = "Please analyze the attached media.";
+  }
+
+  if (!queryPayload.query && mediaRefs.length === 0) {
     return jsonResponse(
       openaiError("messages must contain at least one non-empty content value."),
       400,
@@ -664,15 +1458,33 @@ async function handleChatCompletions(request, config, debug) {
     )}`,
   );
 
-  return withValidKey(config, debug, (apikey) => {
+  return withValidKey(config, debug, async (apikey) => {
+    const sessionId = await getOrCreateSession(
+      config,
+      apikey,
+      requestSessionId(request, data),
+      data.user,
+    );
+
+    if (mediaRefs.length > 0) {
+      debug(`attaching ${mediaRefs.length} media item(s) to session=${sessionId}`);
+      await attachMediaToSession(
+        config,
+        apikey,
+        sessionId,
+        mediaRefs,
+        data.stream ? "stream" : "sync",
+      );
+    }
+
     if (data.stream) {
       return handleStreamCompletion(
         config,
         apikey,
         openaiModel,
         endpointId,
-        query,
-        data.user,
+        queryPayload,
+        sessionId,
       );
     }
 
@@ -681,8 +1493,8 @@ async function handleChatCompletions(request, config, debug) {
       apikey,
       openaiModel,
       endpointId,
-      query,
-      data.user,
+      queryPayload,
+      sessionId,
     );
   });
 }
@@ -721,7 +1533,7 @@ async function handleRequest(request, env) {
   if (path === "/" && request.method === "GET") {
     return jsonResponse({
       name: "OnDemand OpenAI-compatible proxy",
-      endpoints: ["/v1/chat/completions", "/v1/models"],
+      endpoints: ["/v1/chat/completions", "/v1/media/upload", "/v1/models"],
       default_model: config.defaultOndemandModel,
     });
   }
@@ -739,6 +1551,10 @@ async function handleRequest(request, env) {
 
   if (path === "/v1/chat/completions" && request.method === "POST") {
     return handleChatCompletions(request, config, debug);
+  }
+
+  if (path === "/v1/media/upload" && request.method === "POST") {
+    return handleMediaUpload(request, config, debug);
   }
 
   return jsonResponse(openaiError("Not Found"), 404);

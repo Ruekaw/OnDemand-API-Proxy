@@ -6,6 +6,7 @@ compatibility_date = "2025-05-09"
 DEBUG_MODE = "false"
 BAD_KEY_RETRY_INTERVAL = "600"
 ONDEMAND_API_BASE = "https://api.on-demand.io/chat/v1"
+ONDEMAND_MEDIA_API_BASE = "https://api.on-demand.io/media/v1"
 DEFAULT_ONDEMAND_MODEL = "predefined-claude-4-6-opus"
 
 [placement]
