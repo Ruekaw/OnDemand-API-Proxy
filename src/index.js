@@ -646,7 +646,6 @@ function buildMediaMetadata(input, sessionId, responseMode = "sync") {
 function mediaAuthHeaders(apikey, extraHeaders = {}) {
   return {
     apikey,
-    Authorization: `Bearer ${apikey}`,
     ...extraHeaders,
   };
 }
