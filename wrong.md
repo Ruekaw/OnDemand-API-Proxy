@@ -1,12 +1,6 @@
 错误名称: AI_APICallError
-错误信息: OnDemand raw media upload failed: 404 {
-  "message":"no Route matched with those values",
-  "request_id":"085f6d09b9bd12509edd6a4ca2e50b36"
-}
-堆栈信息: AI_APICallError: OnDemand raw media upload failed: 404 {
-  "message":"no Route matched with those values",
-  "request_id":"085f6d09b9bd12509edd6a4ca2e50b36"
-}
+错误信息: OnDemand raw media upload failed: 401 {"message":"No Authorization header","errorCode":"unauthenticated"}
+堆栈信息: AI_APICallError: OnDemand raw media upload failed: 401 {"message":"No Authorization header","errorCode":"unauthenticated"}
     at file:///D:/cherry%20studio/resources/app.asar/out/renderer/assets/store-Bs-WWtk5.js:52106:11
     at async postToApi$2 (file:///D:/cherry%20studio/resources/app.asar/out/renderer/assets/store-Bs-WWtk5.js:52001:24)
     at async OpenAICompatibleChatLanguageModel.doStream (file:///D:/cherry%20studio/resources/app.asar/out/renderer/assets/store-Bs-WWtk5.js:70001:48)
@@ -18,7 +12,7 @@
     at async fn (file:///D:/cherry%20studio/resources/app.asar/out/renderer/assets/store-Bs-WWtk5.js:104746:5)
     at async file:///D:/cherry%20studio/resources/app.asar/out/renderer/assets/store-Bs-WWtk5.js:100731:19
 错误原因: "[undefined]"
-状态码: 500
+状态码: 502
 请求路径: https://ondemand-api-proxy.ruekaw.workers.dev/v1/chat/completions
 请求体: {
   "model": "claude-opus-4-6",
@@ -69,24 +63,26 @@
   "access-control-expose-headers": "X-Session-Id",
   "alt-svc": "h3=\":443\"; ma=86400",
   "cf-placement": "local-LAX",
-  "cf-ray": "a0e93965bdcf1ad1-LAX",
-  "content-length": "198",
+  "cf-ray": "a0e964523ba7583a-LAX",
+  "content-length": "192",
   "content-type": "application/json; charset=utf-8",
-  "date": "Sat, 20 Jun 2026 07:57:43 GMT",
+  "date": "Sat, 20 Jun 2026 08:27:01 GMT",
   "document-policy": "include-js-call-stacks-in-crash-reports",
   "nel": "{\"report_to\":\"cf-nel\",\"success_fraction\":0.0,\"max_age\":604800}",
-  "report-to": "{\"group\":\"cf-nel\",\"max_age\":604800,\"endpoints\":[{\"url\":\"https://a.nel.cloudflare.com/report/v4?s=j6THNaGxmmvZlX%2FP4f0w5oeYlD%2Feiph75tS842dH2cKr0bwfQmvga8yHAKxfvFRbuAXlRtmJ8nCeCfuE865apfdPPLm4hCV%2F6dzcZZAtOBuTOnLhfE4ceHR5JK%2BuldtdqXMSy4HpTJfPR3tOljP83hbLkQ%2FTmeBF\"}]}",
+  "report-to": "{\"group\":\"cf-nel\",\"max_age\":604800,\"endpoints\":[{\"url\":\"https://a.nel.cloudflare.com/report/v4?s=jNsscYRlhJCzOnBofYSyWy07VUU4wGB9mMPZdoUVS8bICOoB3eSSm%2F%2B2YMBKap974SKuqPYCv5ZTcqXis6RIKIYVtRNDlxoUaaoEyWW94rzgG1t5ZpJmDRA%2BvPOO%2FFYK5CtDhxdUNITPsjOzPEPlBi1HwdOyPHdN\"}]}",
   "server": "cloudflare"
 }
 响应内容: {
   "error": {
-    "message": "OnDemand raw media upload failed: 404 {\n  \"message\":\"no Route matched with those values\",\n  \"request_id\":\"085f6d09b9bd12509edd6a4ca2e50b36\"\n}",
-    "type": "server_error"
+    "message": "OnDemand raw media upload failed: 401 {\"message\":\"No Authorization header\",\"errorCode\":\"unauthenticated\"}",
+    "type": "server_error",
+    "code": "ondemand_upstream_error"
   }
 }
 数据: {
   "error": {
-    "message": "OnDemand raw media upload failed: 404 {\n  \"message\":\"no Route matched with those values\",\n  \"request_id\":\"085f6d09b9bd12509edd6a4ca2e50b36\"\n}",
-    "type": "server_error"
+    "message": "OnDemand raw media upload failed: 401 {\"message\":\"No Authorization header\",\"errorCode\":\"unauthenticated\"}",
+    "type": "server_error",
+    "code": "ondemand_upstream_error"
   }
 }

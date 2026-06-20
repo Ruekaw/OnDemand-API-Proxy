@@ -643,13 +643,20 @@ function buildMediaMetadata(input, sessionId, responseMode = "sync") {
   };
 }
 
+function mediaAuthHeaders(apikey, extraHeaders = {}) {
+  return {
+    apikey,
+    Authorization: `Bearer ${apikey}`,
+    ...extraHeaders,
+  };
+}
+
 async function postMediaJson(config, apikey, path, body, label) {
   const response = await fetch(joinUrl(config.ondemandMediaApiBase, path), {
     method: "POST",
-    headers: {
-      apikey,
+    headers: mediaAuthHeaders(apikey, {
       "Content-Type": "application/json",
-    },
+    }),
     body: JSON.stringify(body),
   });
 
@@ -660,10 +667,9 @@ async function postMediaJson(config, apikey, path, body, label) {
 async function prepareRemoteMediaUrl(config, apikey, url) {
   const response = await fetch(joinUrl(config.ondemandMediaApiBase, "/media/upload"), {
     method: "POST",
-    headers: {
-      apikey,
+    headers: mediaAuthHeaders(apikey, {
       "Content-Type": "application/json",
-    },
+    }),
     body: JSON.stringify({ url }),
   });
 
@@ -727,14 +733,14 @@ function dataUrlToBlob(dataUrl, fallbackName = "upload") {
 async function uploadMediaFormData(config, apikey, formData, fallback = {}) {
   let response = await fetch(joinUrl(config.ondemandMediaApiBase, "/media/raw"), {
     method: "POST",
-    headers: { apikey },
+    headers: mediaAuthHeaders(apikey),
     body: formData,
   });
 
   if (!response.ok && [404, 405].includes(response.status)) {
     response = await fetch(joinUrl(config.ondemandMediaApiBase, "/media/upload"), {
       method: "POST",
-      headers: { apikey },
+      headers: mediaAuthHeaders(apikey),
       body: formData,
     });
   }
