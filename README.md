@@ -32,7 +32,7 @@ the OnDemand `endpointId`. Unknown non-`predefined-` model names fall back to
 | `OPENAI_API_KEY` | Yes | Client-facing bearer token used by SillyTavern. |
 | `ONDEMAND_APIKEYS` | Yes | OnDemand API keys. Use a JSON array like `["key1","key2"]` or a comma-separated string. |
 | `ONDEMAND_API_BASE` | No | Defaults to `https://api.on-demand.io/chat/v1`. |
-| `ONDEMAND_MEDIA_API_BASE` | No | Defaults to `https://api.on-demand.io/media/v1/client`. |
+| `ONDEMAND_MEDIA_API_BASE` | No | Defaults to `https://api.on-demand.io/media/v1`. |
 | `DEFAULT_ONDEMAND_MODEL` | No | Defaults to `predefined-claude-4-6-opus`. |
 | `BAD_KEY_RETRY_INTERVAL` | No | Seconds before a failed OnDemand key is retried. Defaults to `600`. |
 | `DEBUG_MODE` | No | Set to `true` for Worker debug logs. |

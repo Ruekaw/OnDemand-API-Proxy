@@ -1,7 +1,7 @@
 const BAD_KEY_RETRY_INTERVAL = 600;
 const DEFAULT_ONDEMAND_MODEL = "predefined-claude-4-6-opus";
 const ONDEMAND_API_BASE = "https://api.on-demand.io/chat/v1";
-const ONDEMAND_MEDIA_API_BASE = "https://api.on-demand.io/media/v1/client";
+const ONDEMAND_MEDIA_API_BASE = "https://api.on-demand.io/media/v1";
 
 const DEFAULT_MEDIA_PLUGIN_IDS = [
   "plugin-1713954536",
@@ -123,7 +123,7 @@ function joinUrl(base, path) {
 function deriveMediaApiBase(chatApiBase) {
   const normalized = String(chatApiBase || ONDEMAND_API_BASE).replace(/\/+$/, "");
   if (normalized.endsWith("/chat/v1")) {
-    return `${normalized.slice(0, -"/chat/v1".length)}/media/v1/client`;
+    return `${normalized.slice(0, -"/chat/v1".length)}/media/v1`;
   }
   return ONDEMAND_MEDIA_API_BASE;
 }
@@ -516,18 +516,8 @@ function numberOrString(value, fallback = 0) {
   return fallback;
 }
 
-function extractPreparedMediaUrl(data, fallbackUrl) {
-  const payload = mediaUploadPayload(data);
-  if (typeof payload === "string") return payload;
-  return firstNonEmptyString(
-    payload?.url,
-    payload?.secure_url,
-    payload?.publicUrl,
-    payload?.public_url,
-    data?.url,
-    data?.secure_url,
-    fallbackUrl,
-  );
+function normalizeMediaResponseMode(value) {
+  return value === "webhook" ? "webhook" : "sync";
 }
 
 function normalizeMediaUploadResponse(data, fallback = {}) {
@@ -630,13 +620,20 @@ function enrichMediaFormData(formData, sessionId, defaults = {}) {
 function buildMediaMetadata(input, sessionId, responseMode = "sync") {
   const mimeType = firstNonEmptyString(input.mimeType, input.type);
   const name = firstNonEmptyString(input.name, inferMediaName(input.url, mimeType));
+  const actor = firstNonEmptyString(input.createdBy, input.user, "ondemand-proxy");
+  const externalUserId = firstNonEmptyString(
+    input.externalUserId,
+    input.external_user_id,
+    input.user,
+  );
 
   return {
     plugins: normalizePluginList(input.plugins || input.pluginIds),
-    createdBy: input.createdBy || input.user || "ondemand-proxy",
-    updatedBy: input.updatedBy || input.user || "ondemand-proxy",
+    createdBy: actor,
+    updatedBy: firstNonEmptyString(input.updatedBy, input.user, actor),
+    ...(externalUserId ? { externalUserId } : {}),
     sizeBytes: numberOrString(input.sizeBytes, 0),
-    responseMode: input.responseMode || responseMode,
+    responseMode: normalizeMediaResponseMode(input.responseMode || responseMode),
     name,
     url: input.url,
     sessionId,
@@ -646,7 +643,6 @@ function buildMediaMetadata(input, sessionId, responseMode = "sync") {
 function mediaAuthHeaders(apikey, extraHeaders = {}) {
   return {
     apikey,
-    Authorization: apikey,
     ...extraHeaders,
   };
 }
@@ -664,38 +660,8 @@ async function postMediaJson(config, apikey, path, body, label) {
   return readUpstreamBody(response);
 }
 
-async function prepareRemoteMediaUrl(config, apikey, url) {
-  const response = await fetch(joinUrl(config.ondemandMediaApiBase, "/media/upload"), {
-    method: "POST",
-    headers: mediaAuthHeaders(apikey, {
-      "Content-Type": "application/json",
-    }),
-    body: JSON.stringify({ url }),
-  });
-
-  if (!response.ok) {
-    if ([400, 404, 405, 422].includes(response.status)) return null;
-    await throwUpstreamError(response, "OnDemand media URL upload failed");
-  }
-
-  return readUpstreamBody(response);
-}
-
 async function uploadMediaFromUrl(config, apikey, media, sessionId, responseMode) {
-  const prepared = await prepareRemoteMediaUrl(config, apikey, media.url);
-  const preparedUrl = prepared
-    ? extractPreparedMediaUrl(prepared, media.url)
-    : media.url;
-  const preparedPayload = mediaUploadPayload(prepared);
-  const metadata = buildMediaMetadata(
-    {
-      ...media,
-      url: preparedUrl,
-      sizeBytes: preparedPayload?.sizeBytes || media.sizeBytes,
-    },
-    sessionId,
-    responseMode,
-  );
+  const metadata = buildMediaMetadata(media, sessionId, responseMode);
   const registered = await postMediaJson(
     config,
     apikey,
@@ -759,22 +725,12 @@ async function uploadMediaFromDataUrl(config, apikey, media, sessionId, response
     throw new Error("Invalid data URL media payload.");
   }
 
-  const formData = new FormData();
-  formData.append("file", dataFile.blob, dataFile.name);
-  enrichMediaFormData(formData, sessionId, {
+  return uploadMediaFromUrl(config, apikey, {
     ...media,
     name: dataFile.name,
     mimeType: dataFile.mimeType,
     sizeBytes: dataFile.size,
-    responseMode,
-  });
-
-  return uploadMediaFormData(config, apikey, formData, {
-    ...media,
-    name: dataFile.name,
-    mimeType: dataFile.mimeType,
-    sizeBytes: dataFile.size,
-  });
+  }, sessionId, responseMode);
 }
 
 async function uploadMediaReference(config, apikey, media, sessionId, responseMode) {
